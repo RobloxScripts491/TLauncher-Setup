@@ -1,0 +1,400 @@
+local service = 5294
+local secret = "f1f8b50a-663e-4a01-a79b-25bc0ea908f9"
+local useNonce = true
+local onMessage = function(message)
+    game:GetService("StarterGui"):SetCore("ChatMakeSystemMessage", { Text = message })
+end
+
+repeat task.wait(1) until game:IsLoaded() or game.Players.LocalPlayer
+
+local requestSending = false
+local fSetClipboard, fRequest, fStringChar, fToString, fStringSub, fOsTime, fMathRandom, fMathFloor, fGetHwid = setclipboard or toclipboard, request or http_request, string.char, tostring, string.sub, os.time, math.random, math.floor, gethwid or function() return game:GetService("Players").LocalPlayer.UserId end
+local cachedLink, cachedTime = "", 0
+local HttpService = game:GetService("HttpService")
+
+function lEncode(data)
+    return HttpService:JSONEncode(data)
+end
+function lDecode(data)
+    return HttpService:JSONDecode(data)
+end
+local function lDigest(input)
+    local inputStr = tostring(input)
+    local hash = {}
+    for i = 1, #inputStr do
+        table.insert(hash, string.byte(inputStr, i))
+    end
+    local hashHex = ""
+    for _, byte in ipairs(hash) do
+        hashHex = hashHex .. string.format("%02x", byte)
+    end
+    return hashHex
+end
+local host = "https://api.platoboost.com"
+local hostResponse = fRequest({
+    Url = host .. "/public/connectivity",
+    Method = "GET"
+})
+if hostResponse.StatusCode ~= 200 and hostResponse.StatusCode ~= 429 then
+    host = "https://api.platoboost.net"
+end
+
+function cacheLink()
+    if cachedTime + (10*60) < fOsTime() then
+        local response = fRequest({
+            Url = host .. "/public/start",
+            Method = "POST",
+            Body = lEncode({
+                service = service,
+                identifier = lDigest(fGetHwid())
+            }),
+            Headers = {
+                ["Content-Type"] = "application/json"
+            }
+        })
+        if response.StatusCode == 200 then
+            local decoded = lDecode(response.Body)
+            if decoded.success == true then
+                cachedLink = decoded.data.url
+                cachedTime = fOsTime()
+                return true, cachedLink
+            else
+                onMessage(decoded.message)
+                return false, decoded.message
+            end
+        elseif response.StatusCode == 429 then
+            local msg = "You are being rate limited, please wait 20 seconds and try again."
+            onMessage(msg)
+            return false, msg
+        end
+        local msg = "Failed to cache link."
+        onMessage(msg)
+        return false, msg
+    else
+        return true, cachedLink
+    end
+end
+
+cacheLink()
+
+local generateNonce = function()
+    local str = ""
+    for _ = 1, 16 do
+        str = str .. fStringChar(fMathFloor(fMathRandom() * (122 - 97 + 1)) + 97)
+    end
+    return str
+end
+
+for _ = 1, 5 do
+    local oNonce = generateNonce()
+    task.wait(0.2)
+    if generateNonce() == oNonce then
+        local msg = "Platoboost nonce error."
+        onMessage(msg)
+        error(msg)
+    end
+end
+
+local copyLink = function()
+    local success, link = cacheLink()
+    if success then
+        fSetClipboard(link)
+        Window:Notify({
+                Title = "Link Copied!",
+                Description = "Paste it to your browser!",
+                Duration = 20
+            })
+    end
+end
+
+local redeemKey = function(key)
+    local nonce = generateNonce()
+    local endpoint = host .. "/public/redeem/" .. fToString(service)
+    local body = {
+        identifier = lDigest(fGetHwid()),
+        key = key
+    }
+    if useNonce then
+        body.nonce = nonce
+    end
+    local response = fRequest({
+        Url = endpoint,
+        Method = "POST",
+        Body = lEncode(body),
+        Headers = {
+            ["Content-Type"] = "application/json"
+        }
+    })
+    if response.StatusCode == 200 then
+        local decoded = lDecode(response.Body)
+        if decoded.success == true then
+            if decoded.data.valid == true then
+                if useNonce then
+                    if decoded.data.hash == lDigest("true" .. "-" .. nonce .. "-" .. secret) then
+                        return true
+                    else
+                        onMessage("Failed to verify integrity.")
+                        return false
+                    end
+                else
+                    return true
+                end
+            else
+                onMessage("Key is invalid.")
+                return false
+            end
+        else
+            if fStringSub(decoded.message, 1, 27) == "unique constraint violation" then
+                onMessage("You already have an active key, please wait for it to expire before redeeming it.")
+                return false
+            else
+                onMessage(decoded.message)
+                return false
+            end
+        end
+    elseif response.StatusCode == 429 then
+        onMessage("You are being rate limited, please wait 20 seconds and try again.")
+        return false
+    else
+        onMessage("Server returned an invalid status code, please try again later.")
+        return false
+    end
+end
+
+local verifyKey = function(key)
+    if requestSending == true then
+        onMessage("A request is already being sent, please slow down.")
+        return false
+    else
+        requestSending = true
+    end
+    local nonce = generateNonce()
+    local endpoint = host .. "/public/whitelist/" .. fToString(service) .. "?identifier=" .. lDigest(fGetHwid()) .. "&key=" .. key
+    if useNonce then
+        endpoint = endpoint .. "&nonce=" .. nonce
+    end
+    local response = fRequest({
+        Url = endpoint,
+        Method = "GET",
+    })
+    requestSending = false
+    if response.StatusCode == 200 then
+        local decoded = lDecode(response.Body)
+        if decoded.success == true then
+            if decoded.data.valid == true then
+                return true
+            else
+                if fStringSub(key, 1, 4) == "FREE_" then
+                    return redeemKey(key)
+                else
+                    onMessage("Key is invalid.")
+                    return false
+                end
+            end
+        else
+            onMessage(decoded.message)
+            return false
+        end
+    elseif response.StatusCode == 429 then
+        onMessage("You are being rate limited, please wait 20 seconds and try again.")
+        return false
+    else
+        onMessage("Server returned an invalid status code, please try again later.")
+        return false
+    end
+end
+
+local getFlag = function(name)
+    local nonce = generateNonce()
+    local endpoint = host .. "/public/flag/" .. fToString(service) .. "?name=" .. name
+    if useNonce then
+        endpoint = endpoint .. "&nonce=" .. nonce
+    end
+    local response = fRequest({
+        Url = endpoint,
+        Method = "GET",
+    })
+    if response.StatusCode == 200 then
+        local decoded = lDecode(response.Body)
+        if decoded.success == true then
+            if useNonce then
+                if decoded.data.hash == lDigest(fToString(decoded.data.value) .. "-" .. nonce .. "-" .. secret) then
+                    return decoded.data.value
+                else
+                    onMessage("Failed to verify integrity.")
+                    return nil
+                end
+            else
+                return decoded.data.value
+            end
+        else
+            onMessage(decoded.message)
+            return nil
+        end
+    else
+        return nil
+    end
+end
+
+-- Library Integration
+local UserInputService = game:GetService("UserInputService")
+local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/lxte/lates-lib/main/Main.lua"))()
+local Window = Library:CreateWindow({
+    Title = "Key System",
+    Theme = "Dark",
+    Size = UDim2.fromOffset(570, 370),
+    Transparency = 0.2,
+    Blurring = true,
+    MinimizeKeybind = Enum.KeyCode.LeftAlt,
+})
+
+local Themes = {
+    Light = {
+        Primary = Color3.fromRGB(232, 232, 232),
+        Secondary = Color3.fromRGB(255, 255, 255),
+        Component = Color3.fromRGB(245, 245, 245),
+        Interactables = Color3.fromRGB(235, 235, 235),
+        Tab = Color3.fromRGB(50, 50, 50),
+        Title = Color3.fromRGB(0, 0, 0),
+        Description = Color3.fromRGB(100, 100, 100),
+        Shadow = Color3.fromRGB(255, 255, 255),
+        Outline = Color3.fromRGB(210, 210, 210),
+        Icon = Color3.fromRGB(100, 100, 100),
+    },
+    Dark = {
+        Primary = Color3.fromRGB(30, 30, 30),
+        Secondary = Color3.fromRGB(35, 35, 35),
+        Component = Color3.fromRGB(40, 40, 40),
+        Interactables = Color3.fromRGB(45, 45, 45),
+        Tab = Color3.fromRGB(200, 200, 200),
+        Title = Color3.fromRGB(240,240,240),
+        Description = Color3.fromRGB(200,200,200),
+        Shadow = Color3.fromRGB(0, 0, 0),
+        Outline = Color3.fromRGB(40, 40, 40),
+        Icon = Color3.fromRGB(220, 220, 220),
+    },
+    Void = {
+        Primary = Color3.fromRGB(15, 15, 15),
+        Secondary = Color3.fromRGB(20, 20, 20),
+        Component = Color3.fromRGB(25, 25, 25),
+        Interactables = Color3.fromRGB(30, 30, 30),
+        Tab = Color3.fromRGB(200, 200, 200),
+        Title = Color3.fromRGB(240,240,240),
+        Description = Color3.fromRGB(200,200,200),
+        Shadow = Color3.fromRGB(0, 0, 0),
+        Outline = Color3.fromRGB(40, 40, 40),
+        Icon = Color3.fromRGB(220, 220, 220),
+    },
+}
+
+Window:SetTheme(Themes.Dark)
+
+-- Sections
+Window:AddTabSection({
+    Name = "Main",
+    Order = 1,
+})
+
+Window:AddTabSection({
+    Name = "Settings",
+    Order = 2,
+})
+
+-- Main Tab
+local Main = Window:AddTab({
+    Title = "Key System",
+    Section = "Main",
+    Icon = "rbxassetid://11963373994"
+})
+
+Window:AddSection({ Name = "Key Input", Tab = Main })
+
+Window:AddInput({
+    Title = "Enter Key",
+    Description = "Enter your key here",
+    Tab = Main,
+    Callback = function(Text)
+        local Verify = verifyKey(Text)
+        if Verify then
+            Window:Notify({
+                Title = "Key Accepted!",
+                Description = "You entered the correct key!",
+                Duration = 20
+            })
+            loadstring(game:HttpGet("https://raw.githubusercontent.com/RobloxScripts490/GGHUB/refs/heads/main/GGHUB"))()
+            Cancel()
+        else
+            Window:Notify({
+                Title = "Invalid Key!",
+                Description = "You entered an incorrect key!",
+                Duration = 20
+            })
+        end
+    end,
+})
+
+Window:AddButton({
+    Title = "Get Key",
+    Description = "Copy the key link to clipboard",
+    Tab = Main,
+    Callback = function()
+        copyLink()
+    end,
+})
+
+-- Settings Tab
+local Settings = Window:AddTab({
+    Title = "Settings",
+    Section = "Settings",
+    Icon = "rbxassetid://11293977610",
+})
+
+Window:AddKeybind({
+    Title = "Minimize Keybind",
+    Description = "Set the keybind for Minimizing",
+    Tab = Settings,
+    Callback = function(Key)
+        Window:SetSetting("Keybind", Key)
+    end,
+})
+
+Window:AddDropdown({
+    Title = "Set Theme",
+    Description = "Set the theme of the library!",
+    Tab = Settings,
+    Options = {
+        ["Light Mode"] = "Light",
+        ["Dark Mode"] = "Dark",
+        ["Extra Dark"] = "Void",
+    },
+    Callback = function(Theme)
+        Window:SetTheme(Themes[Theme])
+    end,
+})
+
+Window:AddToggle({
+    Title = "UI Blur",
+    Description = "If enabled, must have your Roblox graphics set to 8+ for it to work",
+    Default = true,
+    Tab = Settings,
+    Callback = function(Boolean)
+        Window:SetSetting("Blur", Boolean)
+    end,
+})
+
+Window:AddSlider({
+    Title = "UI Transparency",
+    Description = "Set the transparency of the UI",
+    Tab = Settings,
+    AllowDecimals = true,
+    MaxValue = 1,
+    Callback = function(Amount)
+        Window:SetSetting("Transparency", Amount)
+    end,
+})
+
+Window:Notify({
+    Title = "Key System Loaded!",
+    Description = "Press Left Alt to Minimize and Open the tab!",
+    Duration = 20
+})

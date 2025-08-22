@@ -1,0 +1,509 @@
+local service = 5294
+local secret = "f1f8b50a-663e-4a01-a79b-25bc0ea908f9"
+local useNonce = true
+local onMessage = function(message)
+    game:GetService("StarterGui"):SetCore("ChatMakeSystemMessage", { Text = message })
+end
+
+repeat task.wait(1) until game:IsLoaded() or game.Players.LocalPlayer
+
+local requestSending = false
+local fSetClipboard, fRequest, fStringChar, fToString, fStringSub, fOsTime, fMathRandom, fMathFloor, fGetHwid = setclipboard or toclipboard, request or http_request, string.char, tostring, string.sub, os.time, math.random, math.floor, gethwid or function() return game:GetService("Players").LocalPlayer.UserId end
+local cachedLink, cachedTime = "", 0
+local HttpService = game:GetService("HttpService")
+
+function lEncode(data)
+    return HttpService:JSONEncode(data)
+end
+function lDecode(data)
+    return HttpService:JSONDecode(data)
+end
+local function lDigest(input)
+    local inputStr = tostring(input)
+    local hash = {}
+    for i = 1, #inputStr do
+        table.insert(hash, string.byte(inputStr, i))
+    end
+    local hashHex = ""
+    for _, byte in ipairs(hash) do
+        hashHex = hashHex .. string.format("%02x", byte)
+    end
+    return hashHex
+end
+local host = "https://api.platoboost.com"
+local hostResponse = fRequest({
+    Url = host .. "/public/connectivity",
+    Method = "GET"
+})
+if hostResponse.StatusCode ~= 200 and hostResponse.StatusCode ~= 429 then
+    host = "https://api.platoboost.net"
+end
+
+function cacheLink()
+    if cachedTime + (10*60) < fOsTime() then
+        local response = fRequest({
+            Url = host .. "/public/start",
+            Method = "POST",
+            Body = lEncode({
+                service = service,
+                identifier = lDigest(fGetHwid())
+            }),
+            Headers = {
+                ["Content-Type"] = "application/json"
+            }
+        })
+        if response.StatusCode == 200 then
+            local decoded = lDecode(response.Body)
+            if decoded.success == true then
+                cachedLink = decoded.data.url
+                cachedTime = fOsTime()
+                return true, cachedLink
+            else
+                onMessage(decoded.message)
+                return false, decoded.message
+            end
+        elseif response.StatusCode == 429 then
+            local msg = "You are being rate limited, please wait 20 seconds and try again."
+            onMessage(msg)
+            return false, msg
+        end
+        local msg = "Failed to cache link."
+        onMessage(msg)
+        return false, msg
+    else
+        return true, cachedLink
+    end
+end
+
+cacheLink()
+
+local generateNonce = function()
+    local str = ""
+    for _ = 1, 16 do
+        str = str .. fStringChar(fMathFloor(fMathRandom() * (122 - 97 + 1)) + 97)
+    end
+    return str
+end
+
+for _ = 1, 5 do
+    local oNonce = generateNonce()
+    task.wait(0.2)
+    if generateNonce() == oNonce then
+        local msg = "Platoboost nonce error."
+        onMessage(msg)
+        error(msg)
+    end
+end
+
+local copyLink = function()
+    local success, link = cacheLink()
+    if success then
+        fSetClipboard(link)
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = "Link Copied!",
+            Text = "The key link has been copied to your clipboard.",
+            Duration = 5
+        })
+    end
+end
+
+local redeemKey = function(key)
+    local nonce = generateNonce()
+    local endpoint = host .. "/public/redeem/" .. fToString(service)
+    local body = {
+        identifier = lDigest(fGetHwid()),
+        key = key
+    }
+    if useNonce then
+        body.nonce = nonce
+    end
+    local response = fRequest({
+        Url = endpoint,
+        Method = "POST",
+        Body = lEncode(body),
+        Headers = {
+            ["Content-Type"] = "application/json"
+        }
+    })
+    if response.StatusCode == 200 then
+        local decoded = lDecode(response.Body)
+        if decoded.success == true then
+            if decoded.data.valid == true then
+                if useNonce then
+                    if decoded.data.hash == lDigest("true" .. "-" .. nonce .. "-" .. secret) then
+                        return true
+                    else
+                        onMessage("Failed to verify integrity.")
+                        return false
+                    end
+                else
+                    return true
+                end
+            else
+                onMessage("Key is invalid.")
+                return false
+            end
+        else
+            if fStringSub(decoded.message, 1, 27) == "unique constraint violation" then
+                onMessage("You already have an active key, please wait for it to expire before redeeming it.")
+                return false
+            else
+                onMessage(decoded.message)
+                return false
+            end
+        end
+    elseif response.StatusCode == 429 then
+        onMessage("You are being rate limited, please wait 20 seconds and try again.")
+        return false
+    else
+        onMessage("Server returned an invalid status code, please try again later.")
+        return false
+    end
+end
+
+local verifyKey = function(key)
+    if requestSending == true then
+        onMessage("A request is already being sent, please slow down.")
+        return false
+    else
+        requestSending = true
+    end
+    local nonce = generateNonce()
+    local endpoint = host .. "/public/whitelist/" .. fToString(service) .. "?identifier=" .. lDigest(fGetHwid()) .. "&key=" .. key
+    if useNonce then
+        endpoint = endpoint .. "&nonce=" .. nonce
+    end
+    local response = fRequest({
+        Url = endpoint,
+        Method = "GET",
+    })
+    requestSending = false
+    if response.StatusCode == 200 then
+        local decoded = lDecode(response.Body)
+        if decoded.success == true then
+            if decoded.data.valid == true then
+                return true
+            else
+                if fStringSub(key, 1, 4) == "FREE_" then
+                    return redeemKey(key)
+                else
+                    onMessage("Key is invalid.")
+                    return false
+                end
+            end
+        else
+            onMessage(decoded.message)
+            return false
+        end
+    elseif response.StatusCode == 429 then
+        onMessage("You are being rate limited, please wait 20 seconds and try again.")
+        return false
+    else
+        onMessage("Server returned an invalid status code, please try again later.")
+        return false
+    end
+end
+
+local getFlag = function(name)
+    local nonce = generateNonce()
+    local endpoint = host .. "/public/flag/" .. fToString(service) .. "?name=" .. name
+    if useNonce then
+        endpoint = endpoint .. "&nonce=" .. nonce
+    end
+    local response = fRequest({
+        Url = endpoint,
+        Method = "GET",
+    })
+    if response.StatusCode == 200 then
+        local decoded = lDecode(response.Body)
+        if decoded.success == true then
+            if useNonce then
+                if decoded.data.hash == lDigest(fToString(decoded.data.value) .. "-" .. nonce .. "-" .. secret) then
+                    return decoded.data.value
+                else
+                    onMessage("Failed to verify integrity.")
+                    return nil
+                end
+            else
+                return decoded.data.value
+            end
+        else
+            onMessage(decoded.message)
+            return nil
+        end
+    else
+        return nil
+    end
+end
+
+local currentGui
+local function createGui()
+    local TweenService = game:GetService("TweenService")
+    local UserInputService = game:GetService("UserInputService")
+    local Players = game:GetService("Players")
+    local LocalPlayer = Players.LocalPlayer
+    local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+    local ScreenGui = Instance.new("ScreenGui")
+    ScreenGui.Parent = PlayerGui
+    ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    ScreenGui.Name = "KeySystemGui"
+    ScreenGui.ResetOnSpawn = false -- Prevent GUI from resetting on character spawn
+
+    local Frame = Instance.new("Frame")
+    Frame.Parent = ScreenGui
+    Frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    Frame.BackgroundTransparency = 0
+    Frame.BorderSizePixel = 0
+    Frame.Position = UDim2.new(0.5, -180, 0.5, -120)
+    Frame.Size = UDim2.new(0, 360, 0, 240)
+    Frame.ClipsDescendants = true
+    local Corner = Instance.new("UICorner")
+    Corner.CornerRadius = UDim.new(0, 10)
+    Corner.Parent = Frame
+
+    local Topbar = Instance.new("Frame")
+    Topbar.Name = "Topbar"
+    Topbar.Parent = Frame
+    Topbar.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    Topbar.BackgroundTransparency = 0
+    Topbar.BorderSizePixel = 0
+    Topbar.Size = UDim2.new(1, 0, 0, 40)
+    local TopbarCorner = Instance.new("UICorner")
+    TopbarCorner.CornerRadius = UDim.new(0, 10)
+    TopbarCorner.Parent = Topbar
+
+    local Title = Instance.new("TextLabel")
+    Title.Parent = Topbar
+    Title.BackgroundTransparency = 1
+    Title.Position = UDim2.new(0, 15, 0, 0)
+    Title.Size = UDim2.new(0, 200, 1, 0)
+    Title.Font = Enum.Font.GothamBold
+    Title.Text = "Key System"
+    Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Title.TextTransparency = 0
+    Title.TextSize = 18
+    Title.TextXAlignment = Enum.TextXAlignment.Left
+
+    local Exit = Instance.new("TextButton")
+    Exit.Name = "Exit"
+    Exit.Parent = Topbar
+    Exit.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+    Exit.BackgroundTransparency = 0.5
+    Exit.BorderSizePixel = 0
+    Exit.Position = UDim2.new(1, -35, 0, 5)
+    Exit.Size = UDim2.new(0, 30, 0, 30)
+    Exit.Font = Enum.Font.Gotham
+    Exit.Text = "X"
+    Exit.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Exit.TextTransparency = 0
+    Exit.TextSize = 14
+    local ExitCorner = Instance.new("UICorner")
+    ExitCorner.CornerRadius = UDim.new(0, 8)
+    ExitCorner.Parent = Exit
+
+    local Minimize = Instance.new("TextButton")
+    Minimize.Name = "Minimize"
+    Minimize.Parent = Topbar
+    Minimize.BackgroundColor3 = Color3.fromRGB(0, 128, 128)
+    Minimize.BackgroundTransparency = 0.5
+    Minimize.BorderSizePixel = 0
+    Minimize.Position = UDim2.new(1, -70, 0, 5)
+    Minimize.Size = UDim2.new(0, 30, 0, 30)
+    Minimize.Font = Enum.Font.Gotham
+    Minimize.Text = "-"
+    Minimize.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Minimize.TextTransparency = 0
+    Minimize.TextSize = 14
+    local MinimizeCorner = Instance.new("UICorner")
+    MinimizeCorner.CornerRadius = UDim.new(0, 8)
+    MinimizeCorner.Parent = Minimize
+
+    local MainFrame = Instance.new("Frame")
+    MainFrame.Parent = Frame
+    MainFrame.BackgroundTransparency = 1
+    MainFrame.Position = UDim2.new(0, 0, 0, 40)
+    MainFrame.Size = UDim2.new(1, 0, 1, -40)
+
+    local TextBox = Instance.new("TextBox")
+    TextBox.Parent = MainFrame
+    TextBox.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    TextBox.BackgroundTransparency = 0
+    TextBox.BorderSizePixel = 0
+    TextBox.Position = UDim2.new(0, 20, 0, 20)
+    TextBox.Size = UDim2.new(1, -40, 0, 50)
+    TextBox.Font = Enum.Font.Gotham
+    TextBox.Text = ""
+    TextBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+    TextBox.TextTransparency = 0
+    TextBox.TextSize = 16
+    TextBox.PlaceholderText = "Enter Your Key"
+    TextBox.PlaceholderColor3 = Color3.fromRGB(150, 150, 150)
+    local TextBoxCorner = Instance.new("UICorner")
+    TextBoxCorner.CornerRadius = UDim.new(0, 8)
+    TextBoxCorner.Parent = TextBox
+
+    local GetKey = Instance.new("TextButton")
+    GetKey.Name = "GetKey"
+    GetKey.Parent = MainFrame
+    GetKey.BackgroundColor3 = Color3.fromRGB(0, 120, 255)
+    GetKey.BackgroundTransparency = 0
+    GetKey.BorderSizePixel = 0
+    GetKey.Position = UDim2.new(0, 20, 0, 90)
+    GetKey.Size = UDim2.new(1, -40, 0, 40)
+    GetKey.Font = Enum.Font.GothamBold
+    GetKey.Text = "Get Key"
+    GetKey.TextColor3 = Color3.fromRGB(255, 255, 255)
+    GetKey.TextTransparency = 0
+    GetKey.TextSize = 16
+    local GetKeyCorner = Instance.new("UICorner")
+    GetKeyCorner.CornerRadius = UDim.new(0, 8)
+    GetKeyCorner.Parent = GetKey
+
+    local CheckKey = Instance.new("TextButton")
+    CheckKey.Name = "CheckKey"
+    CheckKey.Parent = MainFrame
+    CheckKey.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
+    CheckKey.BackgroundTransparency = 0
+    CheckKey.BorderSizePixel = 0
+    CheckKey.Position = UDim2.new(0, 20, 0, 140)
+    CheckKey.Size = UDim2.new(1, -40, 0, 40)
+    CheckKey.Font = Enum.Font.GothamBold
+    CheckKey.Text = "Check Key"
+    CheckKey.TextColor3 = Color3.fromRGB(255, 255, 255)
+    CheckKey.TextTransparency = 0
+    CheckKey.TextSize = 16
+    local CheckKeyCorner = Instance.new("UICorner")
+    CheckKeyCorner.CornerRadius = UDim.new(0, 8)
+    CheckKeyCorner.Parent = CheckKey
+
+    -- Draggable functionality
+    local dragging, dragInput, dragStart, startPos
+    local function updateInput(input)
+        local delta = input.Position - dragStart
+        Frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+    Topbar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = Frame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+    Topbar.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and input == dragInput then
+            updateInput(input)
+        end
+    end)
+
+    -- Minimize functionality
+    local isMinimized = false
+    local originalSize = Frame.Size
+    Minimize.MouseButton1Down:Connect(function()
+        isMinimized = not isMinimized
+        local tweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)
+        if isMinimized then
+            TweenService:Create(Frame, tweenInfo, {Size = UDim2.new(0, 360, 0, 40)}):Play()
+            Minimize.Text = "+"
+        else
+            TweenService:Create(Frame, tweenInfo, {Size = originalSize}):Play()
+            Minimize.Text = "-"
+        end
+    end)
+
+    -- Fade out function
+    local function fadeOutGui()
+        local tweenInfo = TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+        local guiElements = {Frame, Topbar, Title, Exit, Minimize, TextBox, GetKey, CheckKey}
+        for _, element in ipairs(guiElements) do
+            if element:IsA("Frame") or element:IsA("TextButton") or element:IsA("TextBox") then
+                TweenService:Create(element, tweenInfo, {BackgroundTransparency = 1}):Play()
+            end
+            if element:IsA("TextLabel") or element:IsA("TextButton") or element:IsA("TextBox") then
+                TweenService:Create(element, tweenInfo, {TextTransparency = 1}):Play()
+            end
+        end
+        TweenService:Create(Frame, tweenInfo, {
+            Size = UDim2.new(0, 0, 0, 0),
+            Position = UDim2.new(0.5, 0, 0.5, 0)
+        }):Play()
+        task.wait(0.5) -- Wait for the fade-out animation to complete
+        ScreenGui:Destroy()
+        currentGui = nil -- Set to nil to indicate GUI is destroyed
+    end
+
+    -- Exit functionality with fade-out
+    Exit.MouseButton1Down:Connect(function()
+        fadeOutGui()
+    end)
+
+    -- Button hover effects
+    local function createHoverEffect(button)
+        button.MouseEnter:Connect(function()
+            TweenService:Create(button, TweenInfo.new(0.2), {BackgroundTransparency = 0.2}):Play()
+        end)
+        button.MouseLeave:Connect(function()
+            TweenService:Create(button, TweenInfo.new(0.2), {BackgroundTransparency = 0}):Play()
+        end)
+    end
+    createHoverEffect(GetKey)
+    createHoverEffect(CheckKey)
+    createHoverEffect(Exit)
+    createHoverEffect(Minimize)
+
+    -- Key check functionality with fade-out
+    CheckKey.MouseButton1Down:Connect(function()
+        if TextBox and TextBox.Text then
+            local Verify = verifyKey(TextBox.Text)
+            if Verify then
+                game:GetService("StarterGui"):SetCore("SendNotification", {
+                    Title = "Key Accepted!",
+                    Text = "You Entered Correct Key!",
+                    Duration = 5
+                })
+                loadstring(game:HttpGet("https://raw.githubusercontent.com/RobloxScripts490/GGHUB/refs/heads/main/GGHUB"))()
+                fadeOutGui()
+            else
+                game:GetService("StarterGui"):SetCore("SendNotification", {
+                    Title = "Invalid Key!",
+                    Text = "You Entered Wrong Key!",
+                    Duration = 5
+                })
+            end
+        end
+    end)
+
+    -- Get key functionality
+    GetKey.MouseButton1Down:Connect(function()
+        copyLink()
+    end)
+
+    -- Initial animation
+    Frame.Position = UDim2.new(0.5, -180, 0.5, -300)
+    TweenService:Create(Frame, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Position = UDim2.new(0.5, -180, 0.5, -120)}):Play()
+
+    return ScreenGui
+end
+
+-- Create GUI and store reference
+currentGui = createGui()
+
+-- Handle player leaving the game
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+Players.PlayerRemoving:Connect(function(player)
+    if player == LocalPlayer and currentGui then
+        currentGui:Destroy()
+        currentGui = nil
+    end
+end)
